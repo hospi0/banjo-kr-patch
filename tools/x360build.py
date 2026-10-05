@@ -610,6 +610,7 @@ def apply_quiz(assets, qtr, cmap, qov):
 jp_w = {}
 DIFF_TSV = os.path.join(ROOT, 'work', 'text', 'x360_diff.tsv')
 X360_KR = os.path.join(ROOT, 'work', 'text', 'x360_kr.tsv')
+X360_CREDITS = os.path.join(ROOT, 'work', 'text', 'x360_credits.tsv')
 
 
 def map_rows(tr, assets):
@@ -785,6 +786,28 @@ def main():
     left = [x for x in diff if x[3] < 0 or (x[1], x[2], x[3]) not in done]
     print('360 원문이 다른 줄 %d개 중 x360_kr.tsv 로 %d줄 · 360 전용 포함 %d줄 적용 · 남은 줄 %d (영어로 남음, N64 전용 크레딧 등)'
           % (len(diff), len(diff) - len(left), extra, len(left)))
+    # 남은 360 대사(엔딩 크레딧·360 전용 안내) — 일본어를 하나도 남기지 않는다(だぢづで = 한글 선행 바이트와 겹침)
+    # x360_credits.tsv(영어 원문 → 번역) 에 있으면 번역, 없으면(사람 이름) 영어를 일본어 칸에 그대로
+    with open(X360_CREDITS, encoding='utf-8-sig', newline='') as fh:
+        r = csv.reader(fh, delimiter='\t', quoting=csv.QUOTE_NONE); next(r)
+        credits = {c[0]: normalize(c[1]) for c in r}
+    n_cr = n_name = 0
+    for k, b in enumerate(assets):
+        if len(b) > 9 and b[0] == 4:
+            try:
+                L, _ = parse_dialog(b)
+            except Exception:
+                continue
+            for s, sec in enumerate(L[0]):
+                for i, (c, t) in enumerate(sec):
+                    en = t.rstrip(b'\0').decode('latin-1').replace('\xfd', '{FD}')
+                    if c >= 0x80 and en and (k, s, i) not in done:
+                        if en in credits:
+                            n_cr += 1
+                        else:
+                            n_name += 1
+                        by_asset.setdefault(k, []).append((s, i, en, credits.get(en, en)))
+    print('남은 대사: 번역 %d · 영어 그대로(이름) %d' % (n_cr, n_name))
     qtr = read_tsv(src, '퀴즈')
     ui = read_ui()
     img, base, _ = xex.load(os.path.join(PKG, 'default.xex'))
