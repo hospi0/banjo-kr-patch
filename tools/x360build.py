@@ -30,6 +30,7 @@ FONT_TABLE = 0x6EA
 LEAD0, NLEAD = 0xF0, 4
 TRAILS = [t for t in range(1, 256) if t not in (0x20, 0xFD)]
 TEX_W, TEX_H = 1024, 1280
+LOGO_EN, LOGO_JP = 11, 12                        # 타이틀 로고 텍스처(영어 / 일본어)
 NGLYPH = (TEX_W // 32) * (TEX_H // 32)          # 1280 칸 = id 0~1279
 LINE_UNITS = 222                                 # 일본어 원본 최장 줄 226 단위(16 = 32px)
 KR_W = 14                                        # 한글 글자 폭(단위) = 진행 폭(글자별 폭 모드)
@@ -240,7 +241,13 @@ def build_textures(atlas_img):
     struct.pack_into('>6I', hdr, 0x1C, *f)
     body = d[data0:]
     body = body + bytes(off - len(body)) if len(body) < off else body[:off]
-    out = struct.pack('>I', n + 1) + d[4:H] + entry + d[H:data0] + bytes(hdr) + body + pix
+    # 타이틀 로고: 일본어(12번) 자리에 영어 로고(11번)를 그대로 — 크기·형식·밉 같음 (하스피 «영문으로 교체»)
+    body = bytearray(body)
+    (o11, w11, h11, s11, _), (o12, w12, h12, s12, _) = (struct.unpack_from('>5I', d, 4 + i * 20) for i in (LOGO_EN, LOGO_JP))
+    assert (w11, h11, s11) == (w12, h12, s12) and d[H + LOGO_EN * 0x34:][:0x34][0x1C:] == d[H + LOGO_JP * 0x34:][:0x34][0x1C:]
+    body[o12:o12 + s12] = body[o11:o11 + s11]
+    body = bytes(body)
+    out =struct.pack('>I', n + 1) + d[4:H] + entry + d[H:data0] + bytes(hdr) + body + pix
     return out, n
 
 # ---------------------------------------------------------------- xex hook
@@ -275,11 +282,120 @@ def patch_xex(img):
         assert r32(CAVE + i * 4) == 0
         w32(CAVE + i * 4, w)
     w32(HOOK_AT, ppc.b(HOOK_AT, CAVE))
+
+    # 문자열 폭(이름표 띠 길이·정렬) 0x820D1E70 의 FD 6A 경로: 한글 선행이면 폭 KR_W, 후행 건너뜀
+    WIDTH_AT, WIDTH_RET = 0x820D1F24, 0x820D1F30
+    orig = [r32(WIDTH_AT + 4 * k) for k in range(3)]   # slwi r10,r10,4 / add r10,r10,r9 / lwa r10,0xC(r10)
+    assert orig[0] == 0x554A2036, hex(orig[0])
+    cave2 = CAVE + 0x40
+    words = ppc.assemble([
+        ppc.cmplwi(6, 10, LEAD0), ('blt', 'n'),
+        ppc.cmplwi(6, 10, LEAD0 + NLEAD), ('bge', 'n'),
+        ppc.addi(11, 11, 1),
+        ppc.li(10, KR_W), ('b', WIDTH_RET),
+        ('label', 'n'), orig[0], orig[1], orig[2], ('b', WIDTH_RET)], cave2)
+    for i, w in enumerate(words):
+        assert r32(cave2 + i * 4) == 0
+        w32(cave2 + i * 4, w)
+    w32(WIDTH_AT, ppc.b(WIDTH_AT, cave2))
+
+    # 메뉴 글상자 줄 접기 0x82147038 의 일본어 경로(바이트 수로 끊음): 한글 2바이트 = 1글자, 둘 사이에서 안 끊음
+    WRAP_AT, WRAP_RET = 0x82147148, 0x82147178
+    assert r32(WRAP_AT) == ppc.li(10, 0), hex(r32(WRAP_AT))
+    cave3 = CAVE + 0x80
+    words = ppc.assemble([
+        ppc.li(10, 0),
+        ('label', 'L'),
+        ppc.cmpw(6, 10, 4), ('bge', 'done'),
+        ppc.lbzx(8, 9, 11),
+        ppc.cmplwi(6, 8, 6), ('beq', 'done'),
+        ppc.cmplwi(6, 8, LEAD0), ('blt', 'one'),
+        ppc.cmplwi(6, 8, LEAD0 + NLEAD), ('bge', 'one'),
+        ppc.addi(11, 11, 1),
+        ('label', 'one'),
+        ppc.addi(11, 11, 1), ppc.addi(10, 10, 1),
+        ppc.lbzx(8, 9, 11), ppc.cmplwi(0, 8, 0), ('bne0', 'L'),
+        ('label', 'done'), ('b', WRAP_RET)], cave3)
+    for i, w in enumerate(words):
+        assert r32(cave3 + i * 4) == 0
+        w32(cave3 + i * 4, w)
+    w32(WRAP_AT, ppc.b(WRAP_AT, cave3))
+
     w32(0x820D15A4, 0x38C00000)                    # li r6,0  (높이 → 텍스처 자체 크기)
     w32(0x820D15AC, 0x38A00000)                    # li r5,0  (폭)
     assert r32(SPACE_TAB) == 16
     w32(SPACE_TAB, SPACE_VAL)
     return bytes(img)
+
+
+# ---------------------------------------------------------------- xex 안 일본어 문자열 (일시정지·파일 선택·출연진)
+X360_XEX = os.path.join(ROOT, 'work', 'text', 'x360_xex.tsv')
+STR_CAVE = 0x8244A000                            # .text 끝 뒤 빈 곳(0x82440CF4~0x82450000, 0 확인) — 훅 코드는 0x82448000
+CAST_TABLE = 0x8245DBF8                          # 출연진 20B 항목 {?, 영어 이름*, ?, 일본어 이름*, 플래그}
+
+
+def read_xex_tr():
+    with open(X360_XEX, encoding='utf-8-sig', newline='') as fh:
+        r = csv.reader(fh, delimiter='\t', quoting=csv.QUOTE_NONE); next(r)
+        return [(int(c[0], 16), c[1], c[2], c[3]) for c in r]   # 번역은 앞뒤 공백까지 그대로(이어 붙는 조각)
+
+
+def cast_names(img):
+    """출연진 표 → [(일본어 포인터 칸 주소, 영어 이름)]"""
+    out = []                                     # 표가 일본어 이름 덩어리 사이사이에 여러 개 — 항목 모양으로 훑는다
+    a = CAST_TABLE
+    while a < 0x82460000:
+        en_p, _, jp_p, z = struct.unpack_from('>4I', img, a + 4 - 0x82000000)
+        if (0x82008000 <= en_p < 0x8200A000 and 0x8245D000 <= jp_p < 0x8245F000 and
+                img[jp_p - 0x82000000:jp_p - 0x82000000 + 2] == b'\xfd\x6a'):
+            e = img.index(b'\0', en_p - 0x82000000)
+            out.append((a + 12, img[en_p - 0x82000000:e].decode('latin-1')))
+            a += 20
+        else:
+            a += 4
+    return out
+
+
+def patch_xex_strings(img, cmap, rows, cast_kr):
+    """반환: (img, 제자리 수, 옮긴 수, 출연진 수, 빠진 출연진)"""
+    img = bytearray(img)
+    def at(va):
+        return va - 0x82000000
+    cave = STR_CAVE
+    def put(b):
+        nonlocal cave
+        o = at(cave)
+        assert img[o:o + len(b)] == bytes(len(b)), '동굴 자리가 비어 있지 않음'
+        img[o:o + len(b)] = b
+        va = cave
+        cave = (cave + len(b) + 3) & ~3
+        assert cave < 0x82450000
+        return va
+    n_in = n_ptr = 0
+    for va, how, _, kr in rows:
+        if how == '제자리':
+            o = at(va)
+            e = img.index(b'\0', o)
+            slot = e - o
+            while img[o + slot] == 0:
+                slot += 1
+            data = encode(kr, cmap)
+            if img[o:o + 2] != b'\xfd\x6a':
+                data = data[2:]                        # 원래 FD 6A 없이 앞 문자열에 이어 붙는 조각
+            assert len(data) <= slot, ('제자리 칸 넘침', hex(va), kr, len(data), slot)
+            img[o:o + slot] = data + bytes(slot - len(data))
+            n_in += 1
+        else:
+            struct.pack_into('>I', img, at(va), put(encode(kr, cmap)))
+            n_ptr += 1
+    miss = []
+    names = cast_names(bytes(img))
+    for slot_va, en in names:
+        kr = cast_kr.get(en)
+        if kr is None:
+            miss.append(en); continue
+        struct.pack_into('>I', img, at(slot_va), put(encode(kr, cmap)))
+    return bytes(img), n_in, n_ptr, len(names) - len(miss), miss
 
 # ---------------------------------------------------------------- main
 def read_tsv(path, kind='대사'):
@@ -336,6 +452,26 @@ def read_ui():
         return {int(c[0]): (c[1], normalize(c[2]) if len(c) > 2 and c[2].strip() else '') for c in r}
 
 
+def nchars(t):
+    """메뉴 글상자가 세는 글자 수: 한글·영숫자·공백 1, {FD}x 2(바이트 둘)"""
+    return sum(2 if len(c) > 1 else 1 for c in TOKEN.findall(t))
+
+
+def _wrap_chars(t, maxc, maxw):
+    lines, cur = [], ''
+    for w in t.split(' '):
+        cand = (cur + ' ' + w) if cur else w
+        if (nchars(cand) <= maxc and width(cand) <= maxw) or not cur:
+            if nchars(cand) > maxc:
+                raise ValueError('공백 없는 구간이 한 줄(%d글자)을 넘음: %s' % (maxc, cand))
+            cur = cand
+        else:
+            lines.append(cur); cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 def ui_kind(j):
     """일본어 칸 원래 형식: FONT(FD 6A 게임 글꼴) / UTF16(시스템 메시지 상자, BE + 0 한 바이트) / ASCII(영어 그대로)"""
     if j[:2] == b'\xfd\x6a':
@@ -365,15 +501,20 @@ def apply_ui(ui, cmap):
         else:
             jl = jp[i][2:].rstrip(b'\0').split(b'\x06') if kind == 'FONT' else [jp[i].rstrip(b'\0')]
             jw = max(sum(SPACE_W if c == 0x0F else jp_w[c] for c in l) for l in jl) if kind == 'FONT' else LINE_UNITS
+            # 글상자는 줄을 «글자 수»로 끊고(한글 2바이트 = 1글자, xex 패치) 끊은 자리 다음 글자를 건너뛴다
+            # → 일본어 원본 줄의 최대 글자 수 이하로 미리 나눠 엔진 한계에 안 걸리게
+            jc = max(len(l) for l in jl)
             lines = []
             for seg in kr.split('\\'):
                 if len(jl) > 1:
-                    lines += _wrap(seg, max(jw, 150)) if seg else ['']
+                    lines += _wrap_chars(seg, jc, max(jw, 150)) if seg else ['']
                 else:
                     lines.append(seg)
             for l in lines:
                 if l and width(l) > max(jw, 150) + 10:
                     warns.append('%d «%s» 폭 %d > 원본 %d' % (i, l, width(l), jw))
+                if len(jl) > 1 and nchars(l) > jc:
+                    warns.append('%d «%s» %d글자 > 원본 %d' % (i, l, nchars(l), jc))
             jp[i] = b'\xfd\x6a' + b'\x06'.join(encode(l, cmap)[2:-1] for l in lines) + b'\0'
         n += 1
     return build_strings(langs), n, warns
@@ -646,9 +787,14 @@ def main():
           % (len(diff), len(diff) - len(left), extra, len(left)))
     qtr = read_tsv(src, '퀴즈')
     ui = read_ui()
+    img, base, _ = xex.load(os.path.join(PKG, 'default.xex'))
+    xrows = read_xex_tr()
+    cast_kr = {en: kr for en, kr in read_tsv(src, 'UI').values()}
+    cast_kr = {e: cast_kr[e] for _, e in cast_names(img) if e in cast_kr}
     ui_jp = parse_strings(open(STRINGS_DAT, 'rb').read())[UI_LANG]
     texts_all = ([k for items in by_asset.values() for _, _, _, k in items] + [k for _, k in qtr.values()] +
-                 [k for _, k in qov.values()] + ui_font_chars(ui, ui_jp))
+                 [k for _, k in qov.values()] + ui_font_chars(ui, ui_jp) +
+                 [r[3] for r in xrows] + list(cast_kr.values()))
     chars = sorted({c for k in texts_all for c in k if 0xAC00 <= ord(c) <= 0xD7A3})
     assert len(chars) <= kr_cell_ok(), (len(chars), kr_cell_ok())
     cmap = {c: kr_code(k) for k, c in enumerate(chars)}
@@ -685,8 +831,9 @@ def main():
     assets[FONT_TABLE] = bytes(tab)
     db = build_db(d, ent, assets)
 
-    img, base, _ = xex.load(os.path.join(PKG, 'default.xex'))
     img = patch_xex(img)
+    img, n_in, n_ptr, n_cast, cmiss = patch_xex_strings(img, cmap, xrows, cast_kr)
+    print('xex 문자열: 제자리 %d · 옮김 %d · 출연진 %d (번역 없음 %d: %s)' % (n_in, n_ptr, n_cast, len(cmiss), ', '.join(cmiss)))
 
     atlas.save(os.path.join(X360, 'kr_atlas.png'))
     print('대사 에셋 %d개 · 한글 %d자 · 텍스처 #%d %dx%d · db %d B · 텍스처 파일 %d B' % (

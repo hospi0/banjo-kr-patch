@@ -13,6 +13,18 @@ def stw(rs, d, ra):
     return (36 << 26) | (rs << 21) | (ra << 16) | (d & 0xFFFF)
 
 
+def li(rd, simm):
+    return addi(rd, 0, simm)
+
+
+def cmpw(crf, ra, rb):
+    return (31 << 26) | (crf << 23) | (ra << 16) | (rb << 11)
+
+
+def lbzx(rd, ra, rb):
+    return (31 << 26) | (rd << 21) | (ra << 16) | (rb << 11) | (87 << 1)
+
+
 def b(pc, target):
     return (18 << 26) | ((target - pc) & 0x3FFFFFC)
 
@@ -41,7 +53,12 @@ def assemble(items, base):
             if it[0] == 'label':
                 continue
             tgt = labels[it[1]] if isinstance(it[1], str) else it[1]
-            out.append(b(pc, tgt) if it[0] == 'b' else bc(it[0], pc, tgt))
+            if it[0] == 'b':
+                out.append(b(pc, tgt))
+            elif it[0].endswith('0'):                    # 'bne0' 등 = cr0 기준
+                out.append(bc(it[0][:-1], pc, tgt, crf=0))
+            else:
+                out.append(bc(it[0], pc, tgt))
         else:
             out.append(it)
         pc += 4
