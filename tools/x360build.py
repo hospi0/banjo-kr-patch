@@ -211,14 +211,44 @@ def kr_cell_ok():
     return NLEAD * len(TRAILS)
 
 
-def tile_argb(img):
-    a = np.array(img)                                     # RGBA
+def tile_argb(img, pitch=None):
+    """RGBA 그림 → 360 타일 ARGB(8in32 = 바이트 A,R,G,B). pitch = 타일 폭(32 배수)."""
+    a = np.array(img)
+    h, w = a.shape[:2]
+    pitch = pitch or w
     argb = a[..., [3, 0, 1, 2]].reshape(-1, 4)
-    out = np.zeros((TEX_W * TEX_H, 4), np.uint8)
-    ys, xs = np.mgrid[0:TEX_H, 0:TEX_W]
-    idx = np.vectorize(lambda x, y: tiled_offset(x, y, TEX_W, 2))(xs, ys).reshape(-1)
+    out = np.zeros((pitch * ((h + 31) & ~31), 4), np.uint8)
+    ys, xs = np.mgrid[0:h, 0:w]
+    idx = np.vectorize(lambda x, y: tiled_offset(x, y, pitch, 2))(xs, ys).reshape(-1)
     out[idx] = argb
     return out.tobytes()
+
+
+# ---------------------------------------------------------------- 그림: 지역 이름 카드·스탑 앤 스왑 (일본어 모드 전용 그림)
+CARD_FONT = r'C:\claude\utils\font\logo\BlackHanSans.ttf'
+CARDS = [(6564, '나선산'), (6565, '그런틸다의 소굴'), (6566, '멈보의 산'), (6567, '보물의 만'), (6568, '클랭커의 동굴'),
+         (6569, '보글늪'), (6570, '프리지피크'), (6571, '고비의 계곡'), (6572, '미친 괴물 저택'), (6573, '녹슨 양동이 만'),
+         (6574, '똑딱똑딱 숲'), (60, '스탑 앤 스왑')]        # 하스피 승인 2026-10-05 (my files/그래픽/01_지역이름카드)
+CARD_RED, CARD_SH, CARD_D = (240, 20, 0), (240, 170, 60), 5   # 원본 색: 빨강 + 오른쪽 아래 주황 입체 그림자
+
+
+def render_card(text, w, h):
+    from PIL import ImageChops
+    f = ImageFont.truetype(CARD_FONT, 72)
+    bb = f.getbbox(text)
+    m = Image.new('L', (bb[2] - bb[0] + 4, bb[3] - bb[1] + 4), 0)
+    ImageDraw.Draw(m).text((2 - bb[0], 2 - bb[1]), text, font=f, fill=255)
+    s = (h - CARD_D - 2) / m.height                       # 높이를 칸에 맞춤
+    m = m.resize((min(round(m.width * s), w - CARD_D - 2), h - CARD_D - 2), Image.LANCZOS)
+    big = Image.new('L', (w, h), 0)
+    big.paste(m, ((w - CARD_D - m.width) // 2, 1))         # 가운데
+    sh = Image.new('L', (w, h), 0)
+    for k in range(1, CARD_D + 1):
+        sh = ImageChops.lighter(sh, ImageChops.offset(big, k, k))
+    out = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    for col, al in ((CARD_SH, sh), (CARD_RED, big)):
+        lay = Image.new('RGBA', (w, h), col + (0,)); lay.putalpha(al); out.alpha_composite(lay)
+    return out
 
 
 def build_textures(atlas_img):
@@ -246,8 +276,20 @@ def build_textures(atlas_img):
     (o11, w11, h11, s11, _), (o12, w12, h12, s12, _) = (struct.unpack_from('>5I', d, 4 + i * 20) for i in (LOGO_EN, LOGO_JP))
     assert (w11, h11, s11) == (w12, h12, s12) and d[H + LOGO_EN * 0x34:][:0x34][0x1C:] == d[H + LOGO_JP * 0x34:][:0x34][0x1C:]
     body[o12:o12 + s12] = body[o11:o11 + s11]
+    # 지역 이름 카드·스탑 앤 스왑: 기본 단계만 새로 그리고 밉 단계는 0(옛 일본어 축소판이 안 섞이게)
+    hdrs = bytearray(d[H:data0])
+    for tid, text in CARDS:
+        o, w, h, size, _ = struct.unpack_from('>5I', d, 4 + tid * 20)
+        f = list(struct.unpack_from('>6I', hdrs, tid * 0x34 + 0x1C))
+        pitch = ((f[0] >> 22) & 0x1FF) * 32
+        assert (f[2] & 0x1FFF) + 1 == w and ((f[2] >> 13) & 0x1FFF) + 1 == h and (f[1] & 0x3F) == 6
+        px = tile_argb(render_card(text, w, h), pitch)
+        assert len(px) <= size
+        body[o:o + len(px)] = px
+        f[4] &= ~(0xF << 6)
+        struct.pack_into('>6I', hdrs, tid * 0x34 + 0x1C, *f)
     body = bytes(body)
-    out =struct.pack('>I', n + 1) + d[4:H] + entry + d[H:data0] + bytes(hdr) + body + pix
+    out = struct.pack('>I', n + 1) + d[4:H] + entry + bytes(hdrs) + bytes(hdr) + body + pix
     return out, n
 
 # ---------------------------------------------------------------- xex hook
