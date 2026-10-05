@@ -11,7 +11,7 @@ python tools/x360build.py <번역 tsv 폴더 또는 파일> <출력 폴더> [--w
   * 텍스처 크기 상수(0x200×0x200)는 0으로 → 그리기 명령이 텍스처 자체 크기를 씀
   * 일본어 칸은 엔진이 줄을 안 바꾼다 → 한 줄씩 항목으로 나눠 넣음(원본 일본어도 그렇게 돼 있음)
 """
-import csv, glob, os, shutil, struct, sys
+import csv, glob, os, re, shutil, struct, sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -113,10 +113,26 @@ def kr_code(k):
     return bytes([LEAD0 + lead, TRAILS[t]]), (lead + 1) * 256 + TRAILS[t]
 
 
+TOKEN = re.compile(r'\{FD\}.|.')                 # {FD}h 떨림 켬 / {FD}l 끔 = FD + 문자 (설정·해제라 줄마다 다시 넣어도 됨)
+PLACE = 0x02                                     # 일본어 칸의 «끼워 넣기 자리»(영어 칸 ~) — 일본어 원본 36곳 모두 0x02
+PLACE_W = 30                                     # 끼워질 숫자 폭 어림(3자리)
+NORMALIZE = [('…', '...'), ('‥', '..'), ('™', 'TM'), ('＿', ' ')]
+
+
+def normalize(t):
+    for a, b in NORMALIZE:
+        t = t.replace(a, b)
+    return re.sub(' {2,}', ' ', t).strip()
+
+
 def encode(t, cmap):
     out = bytearray(b'\xfd\x6a')
-    for c in t:
-        if c in cmap:
+    for c in TOKEN.findall(t):
+        if len(c) > 1:
+            out += bytes([0xFD, ord(c[-1])])
+        elif c == '~':
+            out.append(PLACE)
+        elif c in cmap:
             out += cmap[c][0]
         elif JP.get(c) is not None:
             out.append(JP[c])
@@ -127,13 +143,27 @@ def encode(t, cmap):
 
 def width(t):
     w = 0
-    for c in t:
-        w += SPACE_W if c == ' ' else (KR_W if ord(c) >= 0xAC00 else jp_w[JP[c]])
+    for c in TOKEN.findall(t):
+        if len(c) > 1:
+            continue
+        w += (SPACE_W if c == ' ' else PLACE_W if c == '~' else
+              KR_W if ord(c) >= 0xAC00 else jp_w[JP[c]])
     return w
 
 
 def wrap(t):
-    """공백에서 줄을 나눔 → 줄 목록 (한 줄 = 항목 하나)."""
+    """공백에서 줄을 나눔 → 줄 목록 (한 줄 = 항목 하나). 떨림({FD}h)이 켜진 채 줄이 넘어가면 다음 줄 앞에 다시 넣는다."""
+    lines = _wrap(t)
+    on = False
+    for k, l in enumerate(lines):
+        if on and not l.startswith('{FD}h'):
+            lines[k] = l = '{FD}h' + l
+        for m in re.findall(r'\{FD\}([hl])', l):
+            on = m == 'h'
+    return lines
+
+
+def _wrap(t):
     words = t.split(' ')
     lines, cur = [], ''
     for w in words:
@@ -252,7 +282,7 @@ def patch_xex(img):
     return bytes(img)
 
 # ---------------------------------------------------------------- main
-def read_tsv(path):
+def read_tsv(path, kind='대사'):
     files = sorted(glob.glob(os.path.join(path, '*.tsv'))) if os.path.isdir(path) else [path]
     tr = {}
     for f in files:
@@ -261,12 +291,199 @@ def read_tsv(path):
             head = next(r)
             ci = {h: i for i, h in enumerate(head)}
             for c in r:
-                if len(c) > ci['번역'] and c[ci['번역']].strip() and c[ci['구분']] == '대사':
-                    tr[c[ci['위치']]] = (c[ci['원문']], c[ci['번역']].strip())
+                if len(c) > ci['번역'] and c[ci['번역']].strip() and c[ci['구분']] == kind:
+                    tr[c[ci['위치']]] = (c[ci['원문']], normalize(c[ci['번역']]))
     return tr
 
 
+# ---------------------------------------------------------------- 그런티 퀴즈
+QUIZ_LINES = 4                                   # 일본어 원본 문제 줄 수 최대(200개 중 194개가 4줄)
+
+
+def parse_quiz(b):
+    """[언어 수][2바이트][u16le 오프셋 × 언어] + 언어마다 [개수] + {cmd, len, data} (0x80 문제 줄, 0x81~ 보기)"""
+    nl = b[0]
+    offs = struct.unpack_from('<%dH' % nl, b, 3)
+    langs = []
+    for o in offs:
+        n = b[o]; o += 1
+        e = []
+        for _ in range(n):
+            c, l = b[o], b[o + 1]
+            e.append((c, b[o + 2:o + 2 + l])); o += 2 + l
+        langs.append(e)
+    return b[1:3], langs
+
+
+def build_quiz(hdr, langs):
+    nl = len(langs)
+    body = bytearray(); offs = []
+    p = 3 + 2 * nl
+    for e in langs:
+        offs.append(p + len(body))
+        body.append(len(e))
+        for c, t in e:
+            assert len(t) < 256
+            body += bytes([c, len(t)]) + t
+    return bytes([nl]) + hdr + struct.pack('<%dH' % nl, *offs) + bytes(body)
+
+
+def apply_quiz(assets, qtr, cmap, qov):
+    """N64 퀴즈 번역(위치 0C00:Q:i) → 영어 칸 글이 같은 360 퀴즈 에셋의 일본어 칸. 반환: (바꾼 에셋 수, 문제 목록)
+    qov = {(360에셋, i): (360영어, 번역)} — x360_kr.tsv 의 «에셋:Q:i» 줄(360 에서 바뀐 보기, 360 만 짧게 다듬은 보기)"""
+    import bkrom
+    rom = bkrom.load_rom(); ntab = bkrom.asset_table(rom)
+    by_n64 = {}
+    for loc, (en, kr) in qtr.items():
+        a, _, i = loc.split(':')
+        by_n64.setdefault(int(a, 16), {})[int(i)] = kr
+    x_by_text = {}
+    for k, b in enumerate(assets):
+        if len(b) > 12 and b[0] == 4 and b[3:5] == b'\x0b\x00':
+            try:
+                hdr, L = parse_quiz(b)
+            except Exception:
+                continue
+            if L[0] and all(c >= 0x80 for c, _ in L[0]):
+                x_by_text.setdefault(tuple(t for _, t in L[0]), []).append(k)
+    n, errs = 0, []
+    for a, rows in sorted(by_n64.items()):
+        _, ent, _ = bkrom.parse_quiz(bkrom.asset(rom, ntab, a))
+        ks = x_by_text.get(tuple(t for _, t in ent))
+        if not ks:                                   # 보기만 바뀐 퀴즈 = 문제 줄이 같은 것
+            q = tuple(t for c, t in ent if c == 0x80)
+            ks = [k for key, kk in x_by_text.items() for k in kk
+                  if len(key) == len(ent) and key[:len(q)] == q]
+        if not ks:
+            errs.append('N64 퀴즈 %04X: 360 에 같은 영어 퀴즈 없음' % a); continue
+        for k in ks:
+            hdr, L = parse_quiz(assets[k])
+            jp = []
+            for i, (c, t) in enumerate(ent):
+                kr = rows.get(i)
+                if (k, i) in qov:
+                    en_x, kr = qov[(k, i)]
+                    assert L[0][i][1].rstrip(b'\0').decode('latin-1') == en_x, ('x360_kr 퀴즈 원문 다름', hex(k), i)
+                elif L[0][i][1] != t:
+                    errs.append('%X:Q:%d 360 보기가 다름(x360_kr.tsv 필요): %s' % (k, i, L[0][i][1])); jp = None; break
+                if kr is None:
+                    errs.append('%04X:Q:%d 번역 없음' % (a, i)); jp = None; break
+                lines = wrap(kr)
+                if c != 0x80 and len(lines) > 1:
+                    errs.append('%04X:Q:%d 보기가 한 줄을 넘음: %s' % (a, i, kr)); jp = None; break
+                jp += [(c, encode(l, cmap)) for l in lines]
+            if jp is None:
+                continue
+            if sum(1 for c, _ in jp if c == 0x80) > QUIZ_LINES:
+                errs.append('%04X 문제가 %d줄을 넘음: %s' % (a, QUIZ_LINES, ' / '.join(rows.get(i, '') for i, (c, _) in enumerate(ent) if c == 0x80)))
+                continue
+            L[1] = jp
+            assets[k] = build_quiz(hdr, L)
+            n += 1
+    return n, errs
+
+
 jp_w = {}
+DIFF_TSV = os.path.join(ROOT, 'work', 'text', 'x360_diff.tsv')
+X360_KR = os.path.join(ROOT, 'work', 'text', 'x360_kr.tsv')
+
+
+def map_rows(tr, assets):
+    """N64 번역 행 → 360 에셋 위치. 영어 원문이 같은 행은 그대로,
+    다른 행(360 버튼 설명 등)은 diff 로 돌려준다 — work/text/x360_diff.tsv 의 «360번역» 칸으로 채운다.
+    반환: {360에셋: [(s, i, 360영어, 번역)]}, [(N64위치, 360에셋, s, i, 360영어, 360번역, N64영어, N64번역)]"""
+    by_n64 = {}
+    for loc, (en, kr) in tr.items():
+        a, s, i = loc.split(':')
+        by_n64.setdefault(int(a, 16), []).append((int(s), int(i), en, kr, loc))
+    en_of = {}
+    for k, b in enumerate(assets):
+        if len(b) > 9 and b[0] == 4:
+            try:
+                en_of[k] = parse_dialog(b)[0][0]
+            except Exception:
+                pass
+    import difflib
+    import bkrom
+    rom = bkrom.load_rom()
+    ntab = bkrom.asset_table(rom)
+    def texts(sec):
+        return [(i, t.rstrip(b'\0').decode('latin-1').replace('\xfd', '{FD}'))   # 번역 TSV 표기와 같게
+                for i, (c, t) in enumerate(sec) if c >= 0x80]
+    n64 = {a: [texts(sec) for sec in bkrom.parse_dialog(bkrom.asset(rom, ntab, a))[1]] for a in by_n64}
+    def score(a, k):
+        en = en_of.get(k)
+        if en is None:
+            return 0
+        return sum(1 for s, sec in enumerate(n64[a]) if s < len(en)
+                   for _, t in sec if t in {x for _, x in texts(en[s])})
+    def align(a, k):
+        """N64 (s,i) → (360 i, 360 영어) — 대사 순서 정렬(같은 글 / 같은 길이로 바뀐 구간은 짝지음)."""
+        en = en_of[k]
+        m = {}
+        for s, sec in enumerate(n64[a]):
+            if s >= len(en):
+                continue
+            xs = texts(en[s])
+            sm = difflib.SequenceMatcher(None, [t for _, t in sec], [t for _, t in xs], autojunk=False)
+            for op, i1, i2, j1, j2 in sm.get_opcodes():
+                if op == 'equal' or (op == 'replace' and i2 - i1 == j2 - j1):
+                    for d in range(i2 - i1):
+                        a_t, b_t = sec[i1 + d][1], xs[j1 + d][1]
+                        head = lambda x: re.sub('[^A-Z]', '', x)[:8]
+                        if (op == 'equal' or head(a_t) == head(b_t) or
+                                difflib.SequenceMatcher(None, a_t, b_t, autojunk=False).ratio() >= 0.45):
+                            m[(s, sec[i1 + d][0])] = xs[j1 + d]
+        return m
+    best, last = {}, 0
+    for a in sorted(by_n64):                       # 같은 문장이 여러 에셋에 있으면 앞 에셋의 번호 차이에 가까운 쪽
+        k = max(range(a - 45, a + 60), key=lambda k: (score(a, k), -abs(k - a - last)))
+        if score(a, k):
+            best[a] = last = k - a
+    done = sorted(best)
+    for a, items in by_n64.items():               # 한 줄도 안 맞는 에셋 = 이웃 에셋의 번호 차이
+        if a not in best:
+            nb = min(done, key=lambda x: abs(x - a))
+            best[a] = best[nb]
+    old = {}
+    if os.path.exists(DIFF_TSV):
+        with open(DIFF_TSV, encoding='utf-8-sig', newline='') as fh:
+            r = csv.reader(fh, delimiter='\t'); next(r)
+            for c in r:
+                if len(c) >= 6:
+                    old[c[0]] = (c[3], c[5].strip())
+    by_asset, diff = {}, []
+    anywhere, used = {}, set()
+    for k, en in en_of.items():
+        for s, sec in enumerate(en):
+            for j, t in texts(sec):
+                anywhere.setdefault(t, []).append((k, s, j))
+    for a, items in sorted(by_n64.items()):
+        k = a + best[a]
+        m = align(a, k) if k in en_of else {}
+        for s, i, e, kr, loc in items:
+            if (s, i) not in m:
+                hit = next((x for x in anywhere.get(e, []) if x not in used), None)
+                if hit is None:
+                    diff.append((loc, k, s, -1, '(360 에 짝 대사 없음)', '', e, kr))
+                else:                                     # 360 에서 다른 에셋으로 옮겨진 대사
+                    used.add(hit)
+                    by_asset.setdefault(hit[0], []).append((hit[1], hit[2], e, kr))
+                continue
+            j, t = m[(s, i)]
+            used.add((k, s, j))
+            if t == e:
+                by_asset.setdefault(k, []).append((s, j, e, kr))
+            else:
+                o = old.get(loc)
+                kr360 = o[1] if o and o[0] == t else ''
+                diff.append((loc, k, s, j, t, kr360, e, kr))
+    with open(DIFF_TSV, 'w', encoding='utf-8', newline='') as fh:
+        w = csv.writer(fh, delimiter='\t', lineterminator='\n')
+        w.writerow(['N64위치', '360위치', 'N64원문', '360원문', 'N64번역', '360번역'])
+        for loc, k, s, i, t, kr360, e, kr in diff:
+            w.writerow([loc, '%X:%d:%d' % (k, s, i), e, t, kr, kr360])
+    return by_asset, diff
 
 
 def verify(tex_bin, tab, assets, changed, img):
@@ -295,6 +512,10 @@ def verify(tex_bin, tab, assets, changed, img):
         x, y, page, j = 8, 4 + k * 36, 0, 0
         while j < len(t):
             c = t[j]; j += 1
+            if page == 0 and c == 0xFD:                    # FD + 명령 바이트 = 폭 0
+                j += 1; continue
+            if page == 0 and c == PLACE:
+                x += PLACE_W * 2; continue
             if page == 0 and LEAD0 <= c < LEAD0 + NLEAD:
                 page = c - (LEAD0 - 2); continue
             gid = (page - 1) * 256 + c if page else c
@@ -322,31 +543,29 @@ def main():
     jp_recs = [struct.unpack('>4I', t[4 + i * 16:20 + i * 16]) for i in range(256)]
     for i, r in enumerate(jp_recs):
         jp_w[i] = r[2]
-    chars = sorted({c for _, k in tr.values() for c in k if 0xAC00 <= ord(c) <= 0xD7A3})
+    by_asset, diff = map_rows(tr, assets)
+    # 360 에서 영어가 바뀐 줄(버튼 설명 등)·360 전용 줄 = work/text/x360_kr.tsv (360위치 / 360원문 / 번역)
+    extra, qov = 0, {}
+    with open(X360_KR, encoding='utf-8-sig', newline='') as fh:
+        r = csv.reader(fh, delimiter='\t'); next(r)
+        for loc, en, kr in r:
+            if ':Q:' in loc:                          # 퀴즈 (에셋:Q:번호)
+                qk, _, qi = loc.split(':')
+                qov[(int(qk, 16), int(qi))] = (en, normalize(kr))
+                continue
+            k, s, i = (int(x, 16) if n == 0 else int(x) for n, x in enumerate(loc.split(':')))
+            items = [x for x in by_asset.get(k, []) if (x[0], x[1]) != (s, i)]
+            by_asset[k] = items + [(s, i, en, normalize(kr))]
+            extra += 1
+    done = {(k, s, i) for k, items in by_asset.items() for s, i, _, _ in items}
+    left = [x for x in diff if x[3] < 0 or (x[1], x[2], x[3]) not in done]
+    print('360 원문이 다른 줄 %d개 중 x360_kr.tsv 로 %d줄 · 360 전용 포함 %d줄 적용 · 남은 줄 %d (영어로 남음, N64 전용 크레딧 등)'
+          % (len(diff), len(diff) - len(left), extra, len(left)))
+    qtr = read_tsv(src, '퀴즈')
+    texts_all = [k for items in by_asset.values() for _, _, _, k in items] + [k for _, k in qtr.values()] + [k for _, k in qov.values()]
+    chars = sorted({c for k in texts_all for c in k if 0xAC00 <= ord(c) <= 0xD7A3})
     assert len(chars) <= kr_cell_ok(), (len(chars), kr_cell_ok())
     cmap = {c: kr_code(k) for k, c in enumerate(chars)}
-
-    by_n64 = {}
-    for loc, (en, kr) in tr.items():
-        a, s, i = loc.split(':')
-        by_n64.setdefault(int(a, 16), []).append((int(s), int(i), en, kr))
-    en_of = {}                                       # 360 대사 에셋 → 영어 칸
-    for k, b in enumerate(assets):
-        if len(b) > 9 and b[0] == 4:
-            try:
-                en_of[k] = parse_dialog(b)[0][0]
-            except Exception:
-                pass
-    def fits(k, items):
-        en = en_of.get(k)
-        return en is not None and all(s < len(en) and i < len(en[s]) and
-                                      en[s][i][1].rstrip(b'\0').decode('latin-1') == e for s, i, e, _ in items)
-    by_asset = {}
-    for a, items in by_n64.items():
-        near = [a + ID_OFFSET] + sorted(en_of, key=lambda k: abs(k - a - ID_OFFSET))
-        k = next((k for k in near if fits(k, items)), None)
-        assert k is not None, 'N64 %X 에 맞는 360 에셋 없음' % a
-        by_asset[k] = items
     for a, items in sorted(by_asset.items()):
         langs, _ = parse_dialog(assets[a])
         en = langs[0]
@@ -354,12 +573,16 @@ def main():
         slots = [[[e] for e in s] for s in jp]
         for s, i, src_en, kr in items:
             cmd, t = en[s][i]
-            assert t.rstrip(b'\0').decode('latin-1') == src_en, (hex(a), s, i, t, src_en)
+            assert cmd >= 0x80 and t.rstrip(b'\0').decode('latin-1').replace('\xfd', '{FD}') == src_en, (hex(a), s, i, t, src_en)
             slots[s][i] = [(cmd, encode(line, cmap)) for line in wrap(kr)]
         # 번역 안 된 영어 대사는 원래 일본어를 못 쓰니 영어 그대로(FD 6A 없이 = 영어 글꼴)
         langs[1] = [[e for sl in s for e in sl] for s in slots]
         assert all(len(s) < 256 for s in langs[1])
         assets[a] = build_dialog(langs)
+    nq, qerrs = apply_quiz(assets, qtr, cmap, qov)
+    print('퀴즈 %d행 → 360 퀴즈 에셋 %d개 · 문제 %d건' % (len(qtr), nq, len(qerrs)))
+    for e in qerrs:
+        print('  퀴즈', e)
 
     # 글꼴 좌표표: [텍스처 번호][1280 × {x,y,w,h}]
     T = Textures(os.path.join(X360, 'textures.bin'))
