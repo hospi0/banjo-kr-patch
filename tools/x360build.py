@@ -163,13 +163,13 @@ def wrap(t):
     return lines
 
 
-def _wrap(t):
+def _wrap(t, limit=LINE_UNITS):
     words = t.split(' ')
     lines, cur = [], ''
     for w in words:
         cand = (cur + ' ' + w) if cur else w
-        if width(cand) <= LINE_UNITS or not cur:
-            if width(cand) > LINE_UNITS:
+        if width(cand) <= limit or not cur:
+            if width(cand) > limit:
                 raise ValueError('공백 없는 구간이 한 줄을 넘음: ' + cand)
             cur = cand
         else:
@@ -294,6 +294,89 @@ def read_tsv(path, kind='대사'):
                 if len(c) > ci['번역'] and c[ci['번역']].strip() and c[ci['구분']] == kind:
                     tr[c[ci['위치']]] = (c[ci['원문']], normalize(c[ci['번역']]))
     return tr
+
+
+# ---------------------------------------------------------------- 360 메뉴 문자열 (RAWFiles/X360_strings.dat)
+STRINGS_DAT = os.path.join(PKG, 'RAWFiles', 'X360_strings.dat')
+X360_UI = os.path.join(ROOT, 'work', 'text', 'x360_ui.tsv')
+UI_LANG = 3                                      # 영/프/독/일 — 4번째가 일본어 칸
+
+
+def parse_strings(d):
+    """[u16 개수][u16 언어 수][u32 언어별 총 길이] + 언어마다 [u32 길이 × 개수] + 문자열들(뒤 쓰레기 바이트는 버림)"""
+    n, nl = struct.unpack_from('<HH', d, 0)
+    p = 4 + 4 * nl
+    lens = []
+    for _ in range(nl):
+        lens.append(struct.unpack_from('<%dI' % n, d, p)); p += 4 * n
+    langs = []
+    for L in range(nl):
+        a = []
+        for l in lens[L]:
+            a.append(d[p:p + l]); p += l
+        langs.append(a)
+    return langs
+
+
+def build_strings(langs):
+    n, nl = len(langs[0]), len(langs)
+    out = bytearray(struct.pack('<HH', n, nl))
+    out += struct.pack('<%dI' % nl, *(sum(len(s) for s in a) for a in langs))
+    for a in langs:
+        out += struct.pack('<%dI' % n, *(len(s) for s in a))
+    for a in langs:
+        for s in a:
+            out += s
+    return bytes(out)
+
+
+def read_ui():
+    with open(X360_UI, encoding='utf-8-sig', newline='') as fh:
+        r = csv.reader(fh, delimiter='\t', quoting=csv.QUOTE_NONE); next(r)      # 원문이 " 로 시작하는 줄 있음
+        return {int(c[0]): (c[1], normalize(c[2]) if len(c) > 2 and c[2].strip() else '') for c in r}
+
+
+def ui_kind(j):
+    """일본어 칸 원래 형식: FONT(FD 6A 게임 글꼴) / UTF16(시스템 메시지 상자, BE + 0 한 바이트) / ASCII(영어 그대로)"""
+    if j[:2] == b'\xfd\x6a':
+        return 'FONT'
+    if j[:1] == b'\0' or any(c >= 0x80 for c in j):
+        return 'UTF16'
+    return 'ASCII'
+
+
+def ui_font_chars(ui, jp):
+    return [kr for i, (_, kr) in ui.items() if kr and ui_kind(jp[i]) != 'UTF16']
+
+
+def apply_ui(ui, cmap):
+    """일본어 칸을 한글로. 게임 글꼴 문자열은 줄바꿈(0x06, 번역의 \\)을 일본어 원본의 최대 줄 폭에 맞춰 넣는다
+    (원본이 한 줄이면 한 줄 — 폭이 원본보다 크면 경고). 반환: (새 파일, 바꾼 수, 경고 목록)"""
+    langs = parse_strings(open(STRINGS_DAT, 'rb').read())
+    en, jp = langs[0], langs[UI_LANG]
+    warns, n = [], 0
+    for i, (src, kr) in sorted(ui.items()):
+        assert en[i].rstrip(b'\0').decode('latin-1') == src, ('x360_ui 원문 다름', i)
+        if not kr:
+            continue
+        kind = ui_kind(jp[i])
+        if kind == 'UTF16':
+            jp[i] = kr.encode('utf-16-be') + b'\0'
+        else:
+            jl = jp[i][2:].rstrip(b'\0').split(b'\x06') if kind == 'FONT' else [jp[i].rstrip(b'\0')]
+            jw = max(sum(SPACE_W if c == 0x0F else jp_w[c] for c in l) for l in jl) if kind == 'FONT' else LINE_UNITS
+            lines = []
+            for seg in kr.split('\\'):
+                if len(jl) > 1:
+                    lines += _wrap(seg, max(jw, 150)) if seg else ['']
+                else:
+                    lines.append(seg)
+            for l in lines:
+                if l and width(l) > max(jw, 150) + 10:
+                    warns.append('%d «%s» 폭 %d > 원본 %d' % (i, l, width(l), jw))
+            jp[i] = b'\xfd\x6a' + b'\x06'.join(encode(l, cmap)[2:-1] for l in lines) + b'\0'
+        n += 1
+    return build_strings(langs), n, warns
 
 
 # ---------------------------------------------------------------- 그런티 퀴즈
@@ -562,7 +645,10 @@ def main():
     print('360 원문이 다른 줄 %d개 중 x360_kr.tsv 로 %d줄 · 360 전용 포함 %d줄 적용 · 남은 줄 %d (영어로 남음, N64 전용 크레딧 등)'
           % (len(diff), len(diff) - len(left), extra, len(left)))
     qtr = read_tsv(src, '퀴즈')
-    texts_all = [k for items in by_asset.values() for _, _, _, k in items] + [k for _, k in qtr.values()] + [k for _, k in qov.values()]
+    ui = read_ui()
+    ui_jp = parse_strings(open(STRINGS_DAT, 'rb').read())[UI_LANG]
+    texts_all = ([k for items in by_asset.values() for _, _, _, k in items] + [k for _, k in qtr.values()] +
+                 [k for _, k in qov.values()] + ui_font_chars(ui, ui_jp))
     chars = sorted({c for k in texts_all for c in k if 0xAC00 <= ord(c) <= 0xD7A3})
     assert len(chars) <= kr_cell_ok(), (len(chars), kr_cell_ok())
     cmap = {c: kr_code(k) for k, c in enumerate(chars)}
@@ -583,6 +669,10 @@ def main():
     print('퀴즈 %d행 → 360 퀴즈 에셋 %d개 · 문제 %d건' % (len(qtr), nq, len(qerrs)))
     for e in qerrs:
         print('  퀴즈', e)
+    strings_dat, nu, uwarn = apply_ui(ui, cmap)
+    print('메뉴 문자열 %d개 한글화 · 폭 경고 %d건' % (nu, len(uwarn)))
+    for e in uwarn:
+        print('  메뉴', e)
 
     # 글꼴 좌표표: [텍스처 번호][1280 × {x,y,w,h}]
     T = Textures(os.path.join(X360, 'textures.bin'))
@@ -610,6 +700,7 @@ def main():
     shutil.copytree(PKG, out_dir)
     xex.write_plain(os.path.join(PKG, 'default.xex'), img, os.path.join(out_dir, 'default.xex'))
     open(os.path.join(out_dir, 'RAWFiles', 'db360.cmp'), 'wb').write(db)
+    open(os.path.join(out_dir, 'RAWFiles', 'X360_strings.dat'), 'wb').write(strings_dat)
     open(os.path.join(out_dir, 'RAWFiles', 'db360.textures.cmp'), 'wb').write(tex_bin)
     print('출력', out_dir)
 
