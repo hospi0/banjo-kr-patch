@@ -1,4 +1,4 @@
-# 반조-카주이 (N64) 한글화
+# 반조-카주이 한글 패치
 
 ## 내려받기
 - 최신 **v0.9** — [릴리즈](https://github.com/hospi0/banjo-kr-patch/releases/latest)에서 `BanjoKazooie_KR_v0.9.zip`
