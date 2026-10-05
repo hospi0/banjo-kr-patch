@@ -10,7 +10,7 @@
 
 ### 엑스박스 360 XBLA판 (Xenia 전용)
 - 최신 **v0.9** — [릴리즈 x360-v0.9](https://github.com/hospi0/banjo-kr-patch/releases/tag/x360-v0.9)에서 `BanjoKazooie_X360_KR_v0.9.zip`
-- 대상: LIVE 패키지(타이틀 ID 58410954)를 푼 폴더의 `default.xex`·`RAWFiles\db360.cmp`·`db360.textures.cmp`·`X360_strings.dat` (파일별 xdelta, 「패치적용.bat」)
+- 사용법: 압축을 푼 폴더에 원본 LIVE 패키지 파일(타이틀 ID 58410954, 원본md5 `7B79170FA9D7847C8422934BC2A59E98`)을 넣고 「패치적용.bat」 실행 → `Banjo Kazooie KR\` 폴더에 한글판이 만들어짐(패키지를 따로 풀 필요 없음)
 - 한글은 «일본어» 언어 자리에 들어감 → Xenia `config\Banjo-Kazooie.config.toml` 의 `[XConfig]` 에 `user_language = 2`
 
 ## 작업 저장소

@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 r"""XBLA(엑스박스 360) 배포 묶음 — dist/BanjoKazooie_X360_KR_v0.9/
-  (파일별 xdelta 4개 + xdelta.exe + readme.txt + 패치적용.bat)
+  (patch\ 파일별 xdelta 37개 + xdelta.exe + readme.txt + 패치적용.bat)
 
-  python tools/x360build.py work/text/fixed <출력폴더> --write   # 먼저 빌드
-  python tools/make_dist_x360.py [출력폴더]                       # xdelta 생성 → 원본에 적용해 바이트 대조
+  python tools/x360build.py work/text/fixed <출력폴더> --write   # 먼저 빌드(출력 = 패키지 전체를 푼 폴더 + 한글 파일)
+  python tools/make_dist_x360.py [출력폴더]                       # xdelta 생성 → 원본 패키지에 적용해 바이트 대조
 
-대상 = LIVE 패키지를 풀어 둔 폴더(default.xex, RAWFiles\). Xenia 전용(암호화·서명 안 함), 언어는 일본어로.
+★사용자는 원본 LIVE 패키지 파일만 옆에 두면 된다: xdelta 의 원본 = «LIVE 패키지 파일 자체»,
+  결과 = 한글판 폴더의 파일 하나하나(안 바뀐 그림·소리 파일도 패키지에서 꺼내 만든다) → 추출 도구 불필요.
+Xenia 전용(암호화·서명 안 함), 언어는 일본어로.
 규칙: 해시는 MD5 대문자 · 한국어 문서는 CP949(CRLF) · 버전은 v0.9 한 자리 · bat 의 if 블록 안 echo 에 괄호 금지.
 """
 import hashlib, os, shutil, subprocess, sys
@@ -13,12 +15,14 @@ import hashlib, os, shutil, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 
 VER = 'v0.9'
-SRC_DIR = os.path.join(ROOT, 'work', 'x360', 'pkg')            # LIVE 패키지(F:\hospi\roms\xbox360 roms\Banjo Kazooie)를 푼 것
+SRC_PKG = r'F:\hospi\roms\xbox360 roms\Banjo Kazooie'          # 원본 LIVE 패키지 파일(읽기만)
+SRC_PKG_MD5 = '7b79170fa9d7847c8422934bc2a59e98'
 OUT_DIR = r'F:\hospi\roms\xbox360 roms\Banjo Kazooie KR'
-FILES = ['default.xex', r'RAWFiles\db360.cmp', r'RAWFiles\db360.textures.cmp', r'RAWFiles\X360_strings.dat']
+OUT_NAME = 'Banjo Kazooie KR'                                  # bat 가 만드는 폴더 이름
 PKG = 'BanjoKazooie_X360_KR_' + VER
 DIST = os.path.join(ROOT, 'dist', PKG)
 XDELTA = r'C:\claude\utils\xdelta.exe'
+WIN = str(64 << 20)                                            # 원본 창 64MB(패키지 50MB 통째로)
 
 
 def md5(p):
@@ -40,22 +44,23 @@ Xenia 에뮬레이터 전용입니다(실기는 시험하지 않았습니다).
 
 [ 적용 방법 ]
 
-1. LIVE 패키지 파일(Banjo Kazooie, 약 50MB)을 Velocity · Horizon · wxPirs 같은
-   도구로 폴더에 풀어 둡니다. 폴더에 default.xex 와 RAWFiles 폴더가 있어야 합니다.
-2. 이 패치 묶음을 통째로 그 폴더에 풀고 「패치적용.bat」 을 실행합니다.
-3. 배치가 파일 4개의 원본 MD5 를 확인하고, 패치한 뒤 결과 MD5 까지 검사합니다.
-   원본은 .bak 으로 남겨 둡니다.
+1. 이 패치 묶음을 푼 폴더에 원본 LIVE 패키지 파일을 넣습니다.
+   (약 50MB, 확장자 없는 파일 · 파일 이름은 아무래도 됩니다)
 
-원본md5 / 패치md5
-{table}
+   원본md5 : {src}
 
-4. Xenia 의 게임 설정 파일(config\\Banjo-Kazooie.config.toml)에서
+2. 「패치적용.bat」 을 실행합니다.
+   배치가 패키지를 MD5 로 찾아 「{out}」 폴더에 한글판 게임 파일
+   {n}개를 만들고, 파일마다 결과 MD5 까지 검사합니다. 원본 패키지는 그대로 둡니다.
+   (패키지를 따로 풀 필요가 없습니다)
+
+3. Xenia 의 게임 설정 파일(config\\Banjo-Kazooie.config.toml)에서
    언어를 일본어로 바꿉니다.
 
    [XConfig]
    user_language = 2
 
-5. Xenia 에서 그 폴더의 default.xex 를 엽니다.
+4. Xenia 에서 「{out}」 폴더의 default.xex 를 엽니다.
 
 
 [ 바뀌는 것 ]
@@ -71,11 +76,19 @@ Xenia 에뮬레이터 전용입니다(실기는 시험하지 않았습니다).
 [ 알려진 사항 ]
 
 ■ 엔딩 크레딧의 사람 이름은 영어 그대로입니다.
+
+
+[ 한글판 파일 MD5 ]
+
+{table}
 """
 
 BAT = r"""@echo off
 setlocal
-set PATCHDIR=%~dp0
+cd /d "%~dp0"
+set XD=%~dp0xdelta.exe
+set SRCMD5={src}
+set OUT={out}
 
 echo.
 echo  ==============================================
@@ -83,63 +96,66 @@ echo    Banjo-Kazooie ^(XBLA^) Korean Patch {ver}
 echo  ==============================================
 echo.
 
-if not exist "default.xex" (
-  echo  [!] default.xex 가 이 폴더에 없습니다.
-  echo      LIVE 패키지를 푼 폴더에서 실행하세요.
-  goto END
-)
-if not exist "%PATCHDIR%xdelta.exe" (
+if not exist "xdelta.exe" (
   echo  [!] xdelta.exe 가 없습니다. 패치 묶음을 그대로 풀고 실행하세요.
   goto END
 )
 
+echo  [1/3] 원본 LIVE 패키지를 찾는 중...
+set PKGFILE=
+for %%F in (*) do call :CHECK "%%F"
+if not defined PKGFILE (
+  echo.
+  echo  [!] 이 폴더에서 원본 LIVE 패키지를 찾지 못했습니다.
+  echo      MD5 %SRCMD5% 인 패키지 파일을 이 폴더에 넣고 다시 실행하세요.
+  goto END
+)
+echo      찾음: %PKGFILE%
+
+echo  [2/3] 한글판 파일 만드는 중...
+if not exist "%OUT%" mkdir "%OUT%"
+if not exist "%OUT%\RAWFiles" mkdir "%OUT%\RAWFiles"
 {calls}
+
+echo  [3/3] 완료.
 echo.
-echo  [OK] 한글 패치 완료. 원본은 .bak 으로 남겨 두었습니다.
-echo       Xenia 언어를 일본어(user_language = 2)로 바꾼 뒤 default.xex 를 여세요.
+echo  [OK] "%OUT%" 폴더에 한글판을 만들었습니다.
+echo       Xenia 언어를 일본어 user_language = 2 로 바꾼 뒤
+echo       "%OUT%\default.xex" 를 여세요.
 goto END
 
-:APPLY
-set NAME=%~1
-set PATCH=%~2
-set SRCMD5=%~3
-set DSTMD5=%~4
-echo  - %NAME%
-if not exist "%NAME%" (
-  echo  [!] "%NAME%" 파일이 없습니다.
-  goto FAIL
-)
+:CHECK
+if defined PKGFILE exit /b 0
+if /I "%~x1"==".bat" exit /b 0
+if /I "%~x1"==".exe" exit /b 0
+if /I "%~x1"==".txt" exit /b 0
+if %~z1 LSS 40000000 exit /b 0
 set HASH=
-for /f "skip=1 tokens=* delims=" %%H in ('certutil -hashfile "%NAME%" MD5') do (
+for /f "skip=1 tokens=* delims=" %%H in ('certutil -hashfile "%~1" MD5') do (
   if not defined HASH set HASH=%%H
 )
 set HASH=%HASH: =%
-if /I "%HASH%"=="%DSTMD5%" (
-  echo    이미 패치된 파일입니다. 건너뜁니다.
-  exit /b 0
-)
-if /I not "%HASH%"=="%SRCMD5%" (
-  echo  [!] 원본 MD5 가 다릅니다. 필요 %SRCMD5% / 현재 %HASH%
-  goto FAIL
-)
-"%PATCHDIR%xdelta.exe" -d -f -s "%NAME%" "%PATCHDIR%%PATCH%" "%NAME%.kr"
+if /I "%HASH%"=="%SRCMD5%" set PKGFILE=%~1
+exit /b 0
+
+:MAKE
+set NAME=%~1
+set DSTMD5=%~2
+"%XD%" -d -f -B {win} -s "%PKGFILE%" "patch\%NAME%.xdelta" "%OUT%\%NAME%"
 if errorlevel 1 (
-  echo  [!] 패치에 실패했습니다.
-  if exist "%NAME%.kr" del "%NAME%.kr"
+  echo  [!] %NAME% 만들기에 실패했습니다.
   goto FAIL
 )
 set HASH2=
-for /f "skip=1 tokens=* delims=" %%H in ('certutil -hashfile "%NAME%.kr" MD5') do (
+for /f "skip=1 tokens=* delims=" %%H in ('certutil -hashfile "%OUT%\%NAME%" MD5') do (
   if not defined HASH2 set HASH2=%%H
 )
 set HASH2=%HASH2: =%
 if /I not "%HASH2%"=="%DSTMD5%" (
-  echo  [!] 결과 MD5 가 다릅니다. 원본은 그대로 둡니다.
-  del "%NAME%.kr"
+  echo  [!] %NAME% 결과 MD5 가 다릅니다.
   goto FAIL
 )
-move /y "%NAME%" "%NAME%.bak" >nul
-move /y "%NAME%.kr" "%NAME%" >nul
+echo      %NAME%
 exit /b 0
 
 :FAIL
@@ -163,32 +179,37 @@ def write_cp949(path, text):
 
 def main():
     out_dir = sys.argv[1] if len(sys.argv) > 1 else OUT_DIR
+    assert md5(SRC_PKG) == SRC_PKG_MD5, '원본 패키지 MD5 다름'
+    files = sorted(os.path.relpath(os.path.join(r, f), out_dir) for r, _, fs in os.walk(out_dir) for f in fs)
+    assert any(f == 'default.xex' for f in files) and all(os.sep not in f or f.startswith('RAWFiles' + os.sep) for f in files), files
     if os.path.exists(DIST):
         shutil.rmtree(DIST)
-    os.makedirs(DIST)
-    rows, calls = [], []
-    for f in FILES:
-        src, dst = os.path.join(SRC_DIR, f), os.path.join(out_dir, f)
-        pname = os.path.basename(f) + '.xdelta'
-        patch = os.path.join(DIST, pname)
-        subprocess.run([XDELTA, '-e', '-9', '-S', 'djw', '-f', '-s', src, dst, patch], check=True)
-        chk = os.path.join(ROOT, 'work', 'dist_check.bin')
-        subprocess.run([XDELTA, '-d', '-f', '-s', src, patch, chk], check=True)
-        sm, dm = md5(src).upper(), md5(dst).upper()
-        ok = md5(chk).upper() == dm
-        os.remove(chk)
-        if not ok:
-            raise SystemExit('⛔ xdelta 되짚기 결과가 패치본과 다르다: ' + f)
-        rows.append((f, sm, dm, os.path.getsize(patch)))
-        calls.append('call :APPLY "%s" "%s" %s %s' % (f, pname, sm, dm))
+    os.makedirs(os.path.join(DIST, 'patch', 'RAWFiles'))
+    chk = os.path.join(ROOT, 'work', 'dist_check.bin')
+    rows, calls, total = [], [], 0
+    for f in files:
+        dst = os.path.join(out_dir, f)
+        patch = os.path.join(DIST, 'patch', f + '.xdelta')
+        subprocess.run([XDELTA, '-e', '-9', '-S', 'djw', '-B', WIN, '-f', '-s', SRC_PKG, dst, patch], check=True)
+        subprocess.run([XDELTA, '-d', '-f', '-B', WIN, '-s', SRC_PKG, patch, chk], check=True)
+        dm = md5(dst).upper()
+        if md5(chk).upper() != dm:
+            raise SystemExit('⛔ xdelta 되짚기 결과가 다르다: ' + f)
+        total += os.path.getsize(patch)
+        rows.append((f, dm, os.path.getsize(patch)))
+        calls.append('call :MAKE "%s" %s' % (f, dm))
+    os.remove(chk)
     shutil.copyfile(XDELTA, os.path.join(DIST, 'xdelta.exe'))
-    table = '\n'.join('  %-28s %s\n  %-28s -> %s' % (f, s, '', d) for f, s, d, _ in rows)
-    write_cp949(os.path.join(DIST, 'readme.txt'), README.format(ver=VER, table=table))
-    write_cp949(os.path.join(DIST, '패치적용.bat'), BAT.format(ver=VER, calls='\n'.join(calls)))
+    table = '\n'.join('  %-30s %s' % (f, d) for f, d, _ in rows)
+    write_cp949(os.path.join(DIST, 'readme.txt'),
+                README.format(ver=VER, src=SRC_PKG_MD5.upper(), out=OUT_NAME, n=len(rows), table=table))
+    write_cp949(os.path.join(DIST, '패치적용.bat'),
+                BAT.format(ver=VER, src=SRC_PKG_MD5.upper(), out=OUT_NAME, win=WIN, calls='\n'.join(calls)))
     zp = shutil.make_archive(DIST, 'zip', os.path.dirname(DIST), PKG)
-    print('✅ %s (되짚기 일치)' % DIST)
-    for f, s, d, n in rows:
-        print('   %-28s %s → %s  xdelta %s B' % (f, s, d, format(n, ',')))
+    print('✅ %s (파일 %d개, 패치 합계 %s B, 되짚기 일치)' % (DIST, len(rows), format(total, ',')))
+    for f, d, n in rows:
+        if n > 100000:
+            print('   %-30s %s  xdelta %s B' % (f, d, format(n, ',')))
     print('   zip %s (%s B)' % (zp, format(os.path.getsize(zp), ',')))
 
 
