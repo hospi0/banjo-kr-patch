@@ -12,6 +12,7 @@
 - 최신 **v0.9** — [릴리즈 x360-v0.9](https://github.com/hospi0/banjo-kr-patch/releases/tag/x360-v0.9)에서 `BanjoKazooie_X360_KR_v0.9.zip`
 - 사용법: 압축을 푼 폴더에 원본 LIVE 패키지 파일(타이틀 ID 58410954, 원본md5 `7B79170FA9D7847C8422934BC2A59E98`)을 넣고 「패치적용.bat」 실행 → `Banjo Kazooie KR\` 폴더에 한글판이 만들어짐(패키지를 따로 풀 필요 없음)
 - 한글은 «일본어» 언어 자리에 들어감 → Xenia `config\Banjo-Kazooie.config.toml` 의 `[XConfig]` 에 `user_language = 2`
+- **패키지판**: 같은 릴리즈의 `BanjoKazooie_X360_KR_v0.9_package.zip` — 원본 LIVE 패키지에 바로 적용해 한글 LIVE 패키지 파일 `Banjo Kazooie [KR]` 하나를 만듦(패치md5 `7A87E4A8AD3F4FCFC0FD057A2FF15164`) → Xenia 에서 그 파일을 엶. 내용은 폴더판과 같음(`tools/make_dist_x360_pkg.py`, 패키지 다시 쌓기 `tools/stfs.py`)
 
 ## 작업 저장소
 
