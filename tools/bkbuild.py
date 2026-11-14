@@ -85,7 +85,8 @@ def render_glyphs(chars):
         g = f.glyphs[ord(ch)]
         w, h, xo, yo = g.bbx
         px = bytearray(GLYPH_W * GLYPH_H)
-        top = 11 - (h + yo)                 # baseline at row 11 (original caps occupy rows 1..10)
+        top = 12 - (h + yo)                 # ★한글은 1~11행 — 0행부터 그리면 실기 N64 에서 윗줄이 잘림(에뮬은 멀쩡, 2026-11-14 실기 제보).
+                                            #   원본 영문 대문자도 1~10행이라 0행이 비어 있음
         for y, row in enumerate(g.bitmap()):
             for x, v in enumerate(row):
                 X, Y = x + xo, y + top
@@ -110,7 +111,7 @@ def render_bold_glyphs(chars):
                 if v:
                     for dy in (0, 1):
                         for dx in (0, 1):
-                            ink.add(((x + xo) * 2 + dx, (y + top) * 2 + dy))
+                            ink.add(((x + xo) * 2 + dx, (y + top) * 2 + dy + 1))   # +1: 0행 비움(실기 윗줄 잘림 대비)
         px = bytearray(BOLD_W * BOLD_H)
         for (X, Y) in ink:                  # 1 px drop shadow (a full outline fills the 2 px gaps between strokes)
             for dy, dx in ((1, 1), (0, 1), (1, 0)):
@@ -145,8 +146,16 @@ def hook_code(glyph_ram, bold_ram=0):
       nop
     d_nz:
       lbu t9, 1(t6)             # previous letter
+      beqz t7, d_lead
       sb v1, 1(t6)
-      bnez t7, d_trail
+      sltiu at, v1, 0x80        # pending lead: only 0x80..0xFC is a trail byte
+      bnez at, d_drop
+      sltiu at, v1, 0xFD
+      bnez at, d_trail
+      nop
+    d_drop:                     # typewriter stopped right after a lead byte; the closing format toggle
+      sb zero, 0(t6)            #   (FD e / FD l / FD q) must not pair with it -> forget the lead
+    d_lead:
       sltiu at, v1, 0x80
       bnez at, d_ascii
       sltiu at, v1, 0xA0

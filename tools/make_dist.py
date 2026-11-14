@@ -11,7 +11,7 @@ import hashlib, os, shutil, subprocess, sys, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 
-VER = 'v0.9'
+VER = 'v0.91'
 NAME = 'Banjo-Kazooie (USA) (Rev 1).z64'
 SRC = os.path.join(r'C:\claude\roms\n64', NAME)
 SRC_MD5 = 'b11f476d4bc8e039355241e871dc08cf'
@@ -63,6 +63,12 @@ README = """반조-카주이 (N64 북미판 Rev 1) 한글 패치 {ver}
 
 ■ 대사 전부(오프닝 데모·등장인물 대화·그런티의 퀴즈)
 ■ 파일 선택 화면, 일시정지 메뉴, 지역 이름, 엔딩 출연진
+
+
+[ 바뀐 점 ]
+
+v0.91 : 실기(N64 본체)에서 한글 글자 윗줄이 잘려 보이던 문제 수정
+        대사가 한 글자씩 나올 때 순간적으로 엉뚱한 글자가 깜빡이던 문제 수정
 """
 
 BAT = r"""@echo off
@@ -165,10 +171,12 @@ def main():
     write_cp949(os.path.join(DIST, 'readme.txt'),
                 README.format(**dict(v, src=src_md5.upper(), dst=dst_md5.upper())))
     write_cp949(os.path.join(DIST, '패치적용.bat'), BAT.format(**v))
-    with zipfile.ZipFile(INSTALL, 'w', zipfile.ZIP_DEFLATED) as z:
-        z.write(OUT, 'Banjo-Kazooie (K).z64')
+    if '--install' in sys.argv:            # F: 설치는 따로 허락받고(2026-11-14)
+        with zipfile.ZipFile(INSTALL, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.write(OUT, 'Banjo-Kazooie (K).z64')
     print('✅ %s\n   xdelta %d B · 원본md5 %s · 패치md5 %s · 되짚기 일치\n   설치 %s'
-          % (DIST, os.path.getsize(patch), src_md5.upper(), dst_md5.upper(), INSTALL))
+          % (DIST, os.path.getsize(patch), src_md5.upper(), dst_md5.upper(),
+             INSTALL if '--install' in sys.argv else '안 함(--install)'))
 
 
 if __name__ == '__main__':
